@@ -1,0 +1,350 @@
+Prompt:
+Build me a nextflow project that takes a collection of wildtype vcf files and subtract the wildtype variants from the experimental ones. Use DSL2
+
+I'll create a Nextflow DSL2 project for you that subtracts wildtype variants from experimental VCF files. This pipeline will help identify variants unique to your experimental samples.
+
+```nextflow
+#!/usr/bin/env nextflow
+
+nextflow.enable.dsl=2
+
+// Parameters
+params.wildtype_vcfs = "wildtype/*.vcf.gz" 
+params.experimental_vcfs = "experimental/*.vcf.gz"
+params.outdir = "results"
+params.help = false
+
+// Show help message
+if (params.help) {
+    log.info """
+    ==================================================================
+    VCF Subtraction Pipeline
+    ==================================================================
+    
+    This pipeline subtracts wildtype variants from experimental VCF files.
+    
+    Usage:
+    nextflow run main.nf --wildtype_vcfs "wildtype/*.vcf.gz" --experimental_vcfs "experimental/*.vcf.gz"
+    
+    Parameters:
+      --wildtype_vcfs      Pattern to match wildtype VCF files (default: ${params.wildtype_vcfs})
+      --experimental_vcfs  Pattern to match experimental VCF files (default: ${params.experimental_vcfs})
+      --outdir             Output directory (default: ${params.outdir})
+      --help               Show this help message
+    ==================================================================
+    """
+    exit 0
+}
+
+// Log pipeline info
+log.info """
+==================================================================
+VCF Subtraction Pipeline
+==================================================================
+wildtype VCFs     : ${params.wildtype_vcfs}
+experimental VCFs : ${params.experimental_vcfs}
+output directory  : ${params.outdir}
+==================================================================
+"""
+
+// Include modules
+include { PREPARE_WILDTYPE; PREPARE_EXPERIMENTAL } from './modules/prepare'
+include { MERGE_WILDTYPE } from './modules/merge'
+include { SUBTRACT_VARIANTS } from './modules/subtract'
+include { GENERATE_REPORT } from './modules/report'
+
+// Define input channels
+Channel
+    .fromPath(params.wildtype_vcfs)
+    .ifEmpty { error "No wildtype VCF files found with pattern: ${params.wildtype_vcfs}" }
+    .set { wildtype_vcf_ch }
+
+Channel
+    .fromPath(params.experimental_vcfs)
+    .ifEmpty { error "No experimental VCF files found with pattern: ${params.experimental_vcfs}" }
+    .map { file -> tuple(file.baseName, file) }
+    .set { experimental_vcf_ch }
+
+// Main workflow
+workflow {
+    // Prepare wildtype VCFs (index and validate)
+    PREPARE_WILDTYPE(wildtype_vcf_ch)
+    
+    // Merge all wildtype VCFs into a single file
+    MERGE_WILDTYPE(PREPARE_WILDTYPE.out.vcf.collect())
+    
+    // Prepare experimental VCFs
+    PREPARE_EXPERIMENTAL(experimental_vcf_ch)
+    
+    // Subtract wildtype variants from each experimental VCF
+    SUBTRACT_VARIANTS(
+        PREPARE_EXPERIMENTAL.out.vcf,
+        MERGE_WILDTYPE.out.merged_vcf,
+        MERGE_WILDTYPE.out.merged_vcf_index
+    )
+    
+    // Generate reports
+    GENERATE_REPORT(SUBTRACT_VARIANTS.out.subtracted_vcf)
+}
+
+```
+
+```groovy
+// Nextflow configuration file
+
+manifest {
+    description = 'Nextflow pipeline for subtracting wildtype variants from experimental VCF files'
+    author = 'Nextflow User'
+    version = '1.0.0'
+}
+
+// Default parameters
+params {
+    wildtype_vcfs = "wildtype/*.vcf.gz"
+    experimental_vcfs = "experimental/*.vcf.gz"
+    outdir = "results"
+    help = false
+}
+
+// Process resource configurations
+process {
+    // Default resources for all processes
+    cpus = 1
+    memory = 2.GB
+    time = 1.hour
+    
+    withName: 'MERGE_WILDTYPE' {
+        cpus = 2
+        memory = 4.GB
+    }
+    
+    withName: 'SUBTRACT_VARIANTS' {
+        cpus = 2
+        memory = 4.GB
+    }
+    
+    // Use container for all processes
+    container = 'quay.io/biocontainers/bcftools:1.15--h0ea216a_2'
+}
+
+// Docker/Singularity configurations
+docker {
+    enabled = true
+}
+
+singularity {
+    enabled = false
+}
+
+// Execution configuration
+executor {
+    name = 'local'
+    cpus = 8
+    memory = '16 GB'
+}
+
+// Output configuration
+timeline {
+    enabled = true
+    file = "${params.outdir}/execution_timeline.html"
+}
+
+report {
+    enabled = true
+    file = "${params.outdir}/execution_report.html"
+}
+
+trace {
+    enabled = true
+    file = "${params.outdir}/execution_trace.txt"
+}
+
+// Run the workflow with these profiles
+profiles {
+    standard {
+        process.executor = 'local'
+    }
+    
+    slurm {
+        process.executor = 'slurm'
+        process.queue = 'normal'
+        process.clusterOptions = '--account=myproject'
+    }
+}
+
+```
+
+Now I'll create the necessary module files:
+
+```nextflow
+process PREPARE_WILDTYPE {
+    tag "Preparing wildtype VCF: ${vcf.fileName}"
+    
+    publishDir "${params.outdir}/prepared", mode: 'copy'
+    
+    input:
+    path vcf
+    
+    output:
+    path "${vcf}.tbi", emit: index
+    path vcf, emit: vcf
+    
+    script:
+    """
+    # Index the VCF file
+    bcftools index --tbi ${vcf}
+    
+    # Validate VCF
+    bcftools view --header-only ${vcf} > /dev/null || { echo "Error: Invalid VCF file ${vcf}"; exit 1; }
+    """
+}
+
+process PREPARE_EXPERIMENTAL {
+    tag "Preparing experimental VCF: ${sample_id}"
+    
+    publishDir "${params.outdir}/prepared", mode: 'copy'
+    
+    input:
+    tuple val(sample_id), path(vcf)
+    
+    output:
+    tuple val(sample_id), path(vcf), path("${vcf}.tbi"), emit: vcf
+    
+    script:
+    """
+    # Index the VCF file
+    bcftools index --tbi ${vcf}
+    
+    # Validate VCF
+    bcftools view --header-only ${vcf} > /dev/null || { echo "Error: Invalid VCF file ${vcf}"; exit 1; }
+    """
+}
+
+```
+
+```nextflow
+process MERGE_WILDTYPE {
+    tag "Merging ${vcfs.size()} wildtype VCF files"
+    
+    publishDir "${params.outdir}/merged", mode: 'copy'
+    
+    input:
+    path vcfs
+    
+    output:
+    path "merged_wildtype.vcf.gz", emit: merged_vcf
+    path "merged_wildtype.vcf.gz.tbi", emit: merged_vcf_index
+    
+    script:
+    """
+    # Create list of VCF files
+    ls -1 ${vcfs} > vcf_list.txt
+    
+    # Merge all wildtype VCFs into a single file
+    bcftools merge --file-list vcf_list.txt -Oz -o merged_wildtype.vcf.gz
+    
+    # Index the merged VCF file
+    bcftools index --tbi merged_wildtype.vcf.gz
+    """
+}
+
+```
+
+```nextflow
+process SUBTRACT_VARIANTS {
+    tag "Subtracting wildtype variants from ${sample_id}"
+    
+    publishDir "${params.outdir}/subtracted", mode: 'copy'
+    
+    input:
+    tuple val(sample_id), path(exp_vcf), path(exp_vcf_index)
+    path wildtype_vcf
+    path wildtype_vcf_index
+    
+    output:
+    tuple val(sample_id), path("${sample_id}.subtracted.vcf.gz"), path("${sample_id}.subtracted.vcf.gz.tbi"), emit: subtracted_vcf
+    
+    script:
+    """
+    # Use bcftools isec to find variants unique to experimental sample (set difference)
+    # -C means complement: output positions present only in the first file but not in the second
+    bcftools isec -C -c none -p temp_dir ${exp_vcf} ${wildtype_vcf}
+    
+    # Compress and rename the output
+    bcftools view -Oz -o ${sample_id}.subtracted.vcf.gz temp_dir/0000.vcf
+    
+    # Index the output VCF
+    bcftools index --tbi ${sample_id}.subtracted.vcf.gz
+    """
+}
+
+```
+
+```nextflow
+process GENERATE_REPORT {
+    tag "Generating report for ${sample_id}"
+    
+    publishDir "${params.outdir}/reports", mode: 'copy'
+    
+    input:
+    tuple val(sample_id), path(vcf), path(vcf_index)
+    
+    output:
+    path "${sample_id}_report.txt", emit: report
+    
+    script:
+    """
+    # Count the number of variants
+    total_variants=\$(bcftools view -H ${vcf} | wc -l)
+    
+    # Extract variant types
+    snps=\$(bcftools view -v snps -H ${vcf} | wc -l)
+    indels=\$(bcftools view -v indels -H ${vcf} | wc -l)
+    
+    # Generate a summary report
+    echo "Sample ID: ${sample_id}" > ${sample_id}_report.txt
+    echo "Total unique variants: \$total_variants" >> ${sample_id}_report.txt
+    echo "SNPs: \$snps" >> ${sample_id}_report.txt
+    echo "Indels: \$indels" >> ${sample_id}_report.txt
+    echo "File: ${vcf}" >> ${sample_id}_report.txt
+    echo "" >> ${sample_id}_report.txt
+    
+    # Add variant statistics by chromosome
+    echo "Variant distribution by chromosome:" >> ${sample_id}_report.txt
+    bcftools view -H ${vcf} | cut -f1 | sort | uniq -c | sort -rn >> ${sample_id}_report.txt
+    """
+}
+
+```
+
+## How to Use This Pipeline
+
+This Nextflow pipeline is designed to find variants unique to your experimental samples by removing any variants that also appear in wildtype/control samples. Here's how to get started:
+
+1. **Install prerequisites:**
+   - Nextflow (version 20.07.1 or later)
+   - Docker or Singularity
+   - bcftools (automatically used via container)
+
+2. **Organize your VCF files:**
+   - Place wildtype VCF files in a directory (e.g., `wildtype/`)
+   - Place experimental VCF files in a directory (e.g., `experimental/`)
+   - Ensure all VCF files are compressed (`.vcf.gz`)
+
+3. **Run the pipeline:**
+   ```bash
+   nextflow run main.nf --wildtype_vcfs "wildtype/*.vcf.gz" --experimental_vcfs "experimental/*.vcf.gz"
+   ```
+
+4. **Pipeline workflow:**
+   - The pipeline first validates and indexes all VCF files
+   - Merges all wildtype VCFs into a single reference file
+   - For each experimental VCF, subtracts variants found in the merged wildtype file
+   - Generates a report with statistics for each subtracted VCF
+
+5. **Outputs:**
+   - `results/subtracted/`: Contains VCFs with only unique experimental variants
+   - `results/reports/`: Contains summary statistics for each sample
+   - Execution reports and logs in the main results directory
+
+Would you like me to explain any specific part of the pipeline in more detail?
