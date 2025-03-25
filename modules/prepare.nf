@@ -7,7 +7,8 @@ process PREPARE_WILDTYPE {
     path vcf
 
     output:
-    tuple path(vcf), path("${vcf}.tbi"), emit: vcf_with_index
+    path vcf, emit: vcf
+    path "${vcf}.tbi", emit: index
 
     script:
     """

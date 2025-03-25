@@ -10,6 +10,8 @@ process GENERATE_REPORT {
     path "${sample_id}_report.txt", emit: report
 
     script:
+    def ref_status = params.reference ? "Annotated with ${params.reference}" : "Not annotated (no reference provided)"
+
     """
     # Count the number of variants
     total_variants=\$(bcftools view -H ${vcf} | wc -l)
@@ -23,8 +25,7 @@ process GENERATE_REPORT {
     echo "Total unique variants: \$total_variants" >> ${sample_id}_report.txt
     echo "SNPs: \$snps" >> ${sample_id}_report.txt
     echo "Indels: \$indels" >> ${sample_id}_report.txt
-    echo "VCF File: ${vcf}" >> ${sample_id}_report.txt
-    echo "Genomediff File: ${params.outdir}/genomediff/${sample_id}.gd" >> ${sample_id}_report.txt
+    echo "Reference annotation: ${ref_status}" >> ${sample_id}_report.txt
     echo "" >> ${sample_id}_report.txt
 
     # Add variant statistics by chromosome
